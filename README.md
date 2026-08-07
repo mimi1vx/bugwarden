@@ -39,10 +39,16 @@ touched or data is returned.
   (the ones most likely to contain not-yet-triaged sensitive data) invisible.
 - **Read-only mode and tool disabling** remove write tools from the MCP tool
   listing entirely — clients never see them, rather than seeing them error.
+- **Audit stream**: an operator-only JSONL record of every tool call — the
+  guard's verdict, the deciding rule, the bug ids it suppressed — with
+  fail-closed modes that hold back further work while records cannot be
+  persisted. The stream is the operator's half of the bargain the guard
+  makes with the client, and no MCP surface can reach it.
 - **Two transports**: streamable HTTP (per-request API key header, or a
   server-held key via `--api-key-file` for fleet deployments) and stdio
   (subprocess launch by a desktop MCP client).
-- Single static binary, async throughout (tokio + [rmcp](https://crates.io/crates/rmcp)).
+- Single static binary, async throughout (tokio + [rmcp](https://crates.io/crates/rmcp)),
+  shipping with a man page and bash/zsh/fish completions.
 
 ## Security model
 
@@ -68,8 +74,9 @@ is `bug_url`, which computes a URL string locally and contacts nothing.
   or detail difference can be used as an existence oracle for embargoed bugs.
 - **Silent search filtering.** Search results are post-filtered through the
   policy; the client is never told how many results were dropped or that
-  filtering happened at all. (Server-side debug logs do record it for the
-  operator.)
+  filtering happened at all. The operator is: a server-side debug log
+  records it, and an audited deployment gets the scan's counts and the
+  withheld ids in the audit stream.
 - **Fail closed.** If the classification fetch fails, if a bug is absent from
   the response, or if a rule consulted for the operation being decided cannot
   be decided because the bug object did not carry a field that rule asks
@@ -149,6 +156,36 @@ source, so it needs a C toolchain (a C compiler and `cmake`) as well as
 Rust — this applies to `cargo install bugwarden` too, not only a source
 build.
 
+### Man page and shell completions
+
+Every release tarball carries the generated CLI assets next to the binary,
+for a distribution package or a manual install to place:
+
+| Path in the tarball | Conventional destination |
+|---------------------|--------------------------|
+| `man/bugwarden.1` | `/usr/share/man/man1/bugwarden.1` |
+| `completions/bugwarden.bash` | `/usr/share/bash-completion/completions/bugwarden` |
+| `completions/_bugwarden` | `/usr/share/zsh/site-functions/_bugwarden` |
+| `completions/bugwarden.fish` | `/usr/share/fish/vendor_completions.d/bugwarden.fish` |
+
+Man page and completions alike are derived from the clap command itself —
+including the man page's `ENVIRONMENT` section, so every flag with an
+environment variable is listed exactly once — by a second binary behind the
+`gen` cargo feature:
+
+```bash
+cargo run --locked -p bugwarden --features gen --bin bugwarden-gen
+# or, to write somewhere else:
+cargo run --locked -p bugwarden --features gen --bin bugwarden-gen -- /tmp/out
+```
+
+Without an argument the generator rewrites the committed copies under
+`crates/bugwarden/`; with one it writes `man/` and `completions/` under that
+directory instead. CI regenerates and diffs them, so the committed assets
+cannot drift from the CLI. The feature gates only this generator — the
+server binary never links `clap_complete` or `clap_mangen`, and a plain
+`cargo build` skips it.
+
 ### TLS trust anchors and proxies
 
 bugwarden validates the Bugzilla server's certificate against the **OS
@@ -169,7 +206,12 @@ ENTRYPOINT ["/usr/local/bin/bugwarden"]
 ```
 
 `HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` from the environment are honored
-for outbound Bugzilla traffic.
+for outbound Bugzilla traffic. Every request to Bugzilla — authenticated
+REST calls and the unauthenticated quicksearch-syntax page alike — carries
+`User-Agent: bugwarden/<version> (+https://github.com/plusky/bugwarden)`, so
+the instance's access log names this build rather than an anonymous HTTP
+client. The header carries nothing else: no key material, no policy path,
+no host.
 
 ## Usage
 
@@ -280,6 +322,26 @@ MCP client configuration:
 }
 ```
 
+### MCP protocol revisions
+
+bugwarden serves four revisions of the Model Context Protocol —
+`2024-11-05`, `2025-03-26`, `2025-06-18` and `2025-11-25` — and offers
+`2025-11-25` when a client asks for something outside that set. The list is
+pinned rather than inherited from the SDK, so a dependency bump cannot
+quietly widen or narrow what a deployment speaks. In the handshake the
+server names itself and its version — `bugwarden` and the release it was
+built from — never the SDK's.
+
+Every session must complete the `initialize` handshake. A request that
+carries a protocol revision in its own `_meta` instead — the handshake-free
+lifecycle — is refused whatever revision it names, because a server that
+answered it would be talking to a client it never greeted, and no audit
+record could say who that was.
+
+The advertised capability set is tools only: bugwarden registers no MCP
+prompts and no MCP resources. `summarize_bug` is a tool that returns prompt
+text, not an MCP prompt.
+
 ## CLI reference
 
 Command-line arguments take precedence over environment variables.
@@ -290,13 +352,24 @@ Command-line arguments take precedence over environment variables.
 | `--transport <http\|stdio>` | `MCP_TRANSPORT` | `http` | MCP transport. `stdio` is for subprocess launches by an MCP client; `http` exposes a network endpoint at `/mcp` |
 | `--host <ADDRESS>` | `MCP_HOST` | `127.0.0.1` | Listen address (http transport only) |
 | `--port <PORT>` | `MCP_PORT` | `8000` | Listen port (http transport only) |
-| `--api-key-header <NAME>` | `MCP_API_KEY_HEADER` | `ApiKey` | HTTP header name in which clients send the Bugzilla API key (http transport only) |
+| `--api-key-header <NAME>` | `MCP_API_KEY_HEADER` | `ApiKey` | HTTP header name in which clients send the Bugzilla API key (http transport only). Not consulted in server-held key mode |
 | `--api-key <KEY>` | `BUGZILLA_API_KEY` | — | Bugzilla API key. **Required** for `--transport stdio` unless `--api-key-file` provides it; with `http` it is ignored with a warning (clients send the key per request — use `--api-key-file` for a server-held key) |
 | `--api-key-file <PATH>` | `BUGZILLA_API_KEY_FILE` | — | Path to a file holding the Bugzilla API key (container secret, systemd `LoadCredential` path). Mutually exclusive with `--api-key`; an empty value counts as unset. Over `http` this selects server-held key mode: every request is served with this key and the per-request header is not consulted |
 | `--use-auth-header` | — | `false` | Authenticate to Bugzilla with `Authorization: Bearer <key>` instead of the `api_key` query parameter |
-| `--read-only` | `MCP_READ_ONLY` | `false` | Disable all write tools. Tighten-only: ORed with the policy's `global.read_only`; cannot re-enable writes a policy forbids |
-| `--policy <PATH>` | `BUGWARDEN_POLICY` | — | Path to the guard policy TOML. Without it, an allow-all policy applies (with private comments off) |
+| `--read-only` | `MCP_READ_ONLY` | `false` | Disable all write tools. Tighten-only: ORed with the policy's `global.read_only`; cannot re-enable writes a policy forbids. As an environment variable it takes the literal `true` or `false` — `1`, `yes` and an empty value are a usage error, not a synonym |
+| `--policy <PATH>` | `BUGWARDEN_POLICY` | — | Path to the guard policy TOML. Without it, an allow-all policy applies (with private comments off and the 2 MiB attachment cap still in force) |
 | `--audit-config <PATH>` | `BUGWARDEN_AUDIT_CONFIG` | — | Path to the audit stream configuration TOML (worked example in [`examples/audit.toml`](examples/audit.toml)). Without it, no audit stream is written. Records carry W3C trace ids when the client sends a `traceparent` in the request's `_meta`, enabling correlation with client-side traces |
+| — | `RUST_LOG` | `info` | Tracing filter for the diagnostic log, which always goes to **stderr** — stdout belongs to the stdio transport. An unparsable value falls back to `info` |
+
+An empty value counts as unset for `--api-key` and `--api-key-file` only, so
+`BUGZILLA_API_KEY_FILE=` in a unit file leaves the two key modes unaffected
+rather than erroring (under stdio it then leaves no key source at all, which
+is a startup error of its own). An empty `BUGWARDEN_POLICY` or
+`BUGWARDEN_AUDIT_CONFIG` is a usage error.
+
+Exit status: `0` on clean shutdown, `1` on a startup or runtime failure (an
+unreadable policy or audit configuration, a key misconfiguration, a Bugzilla
+client or transport error), `2` on a command-line usage error.
 
 ## Policy file reference
 
@@ -322,7 +395,7 @@ A complete, commented example ships in
 | `allow_private_comments` | boolean | `false` | Master switch for **all** private content: comments, attachment metadata, and attachment downloads. Even when `true`, each call must also pass `include_private = true`. On an attachment download a *missing* privacy flag counts as private |
 | `read_only` | boolean | `false` | Strip write capabilities from every grant and remove write tools from the tool listing. The `--read-only` flag ORs into this |
 | `disabled_tools` | array of strings | `[]` | Tool names to remove from the tool listing entirely |
-| `max_attachment_bytes` | integer | `2097152` (2 MiB) | Largest attachment `download_attachment` may return (decoded size). `0` removes the cap. Attachment content is embedded base64 in the tool result and lands in the model's context — raise deliberately |
+| `max_attachment_bytes` | integer | `2097152` (2 MiB) | Largest attachment `download_attachment` may return, and the same ceiling on what `add_attachment` may upload — both measured on the decoded size. `0` removes this cap; over http the transport still refuses a request body above 4 MiB, so an upload stays bounded either way. Downloaded content is embedded base64 in the tool result and lands in the model's context — raise deliberately |
 
 ### `[[rule]]`
 
@@ -332,7 +405,7 @@ applies. Put your most specific (usually most restrictive) rules first.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `name` | string | *required* | Rule identifier (server-side logs only; never shown to clients) |
+| `name` | string | *required* | Rule identifier. It reaches the audit stream, where it names the rule that decided a call, and nothing a client can see |
 | `description` | string | `""` | Free-form operator documentation |
 | `match` | table | `{}` (matches every bug) | Match criteria, see below |
 | `action` | `"allow"` \| `"deny"` \| `"restrict"` | *required* | `allow` grants all capabilities, `deny` grants none, `restrict` grants exactly `capabilities` |
@@ -442,30 +515,159 @@ When the server is read-only (policy or CLI), the eight write capabilities
 are stripped from every grant, including from `allow` rules and the default
 action.
 
+## Audit stream
+
+The guard hides things from the client by design: a denied bug looks like a
+nonexistent one, filtered search results vanish without a trace, and no rule
+is ever named in a response. The audit stream is the other half of that
+bargain — the operator's own record of what was asked and what the guard
+decided. It carries exactly the facts the client must never see, which is
+why it goes only to a local file the operator controls: no MCP surface can
+read it, and it is never mixed into the diagnostic stderr stream.
+
+Auditing is off until `--audit-config` / `BUGWARDEN_AUDIT_CONFIG` names a
+configuration file; a commented example ships in
+[`examples/audit.toml`](examples/audit.toml). Over the http transport,
+starting without one logs a warning. Parsing is strict — unknown keys are a
+startup error, so a typo cannot silently disable a setting.
+
+### Audit configuration reference
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `path` | string | *required* | The JSONL file. Its parent directory is created mode `0700` if missing, the file mode `0600`, and it is only ever appended to. A symlink at this path is refused at startup |
+| `fsync` | boolean | `false` | `sync_data` after every record. `false` already survives a killed process — each record reaches the kernel before the tool response is returned — but only `true` survives power loss, at a latency cost on every call |
+| `fail_mode` | `"open"` \| `"closed_writes_denials"` \| `"closed_all"` | derived from the transport: `open` for stdio, `closed_all` for http | What happens to tool calls while records cannot be persisted, see below |
+| `rotate_max_bytes` | integer | `67108864` (64 MiB) | Rotate before a record would push the live file past this size, so the bound is hard — with one exception: a single record larger than the limit is written into an empty live file as-is, because rotating an empty file would discard nothing and loop. `0` disables built-in rotation — do that when logrotate owns the file, and never let both rotate it |
+| `rotate_keep` | integer | `8` | How many rotated `path.1` … `path.N` files to keep. At least `1` while `rotate_max_bytes` is non-zero, at most `10000`. Shrinking it between runs strands the existing higher-numbered files; bugwarden never deletes those |
+| `suppressed_ids` | boolean | `true` | Whether records may name the bug ids the guard withheld. With `false` only the count survives. The ids are precisely the hidden-bug numbers the server exists to withhold, so with `true` the audit file is itself sensitive — anyone who can read it can enumerate hidden bugs |
+
+### Fail modes
+
+A record is written after its tool has run, so the modes govern what happens
+*next*: once a write has failed, the sink is known to be failing and the
+following calls are held back before they dispatch. The call that first meets
+the outage has already reached Bugzilla, so a single write per outage can
+land unrecorded — and its caller is told it failed. The `audit_gap` record
+that follows recovery is what makes that loss visible.
+
+- **`open`** — keep serving. Lost records surface later as an `audit_gap`
+  record carrying the drop count, but what was asked during the outage is
+  gone. Availability over accountability.
+- **`closed_writes_denials`** — reads the guard fully allowed still proceed
+  unaudited; write tools, and any call where the guard suppressed, denied or
+  refused something, are refused until records persist again.
+- **`closed_all`** — every tool call is refused, and the `initialize`
+  handshake with it, until its record can be persisted. Accountability over
+  availability: an unmonitored full disk takes the deployment down, since no
+  session can even open.
+
+Refusals under the closed modes reuse each tool's ordinary failure wording,
+so a refused call is not distinguishable from an ordinary failure, and a
+protocol-level error from the router stands under every mode rather than
+being reshaped into one. The one place an outage is legible to a client is
+the `closed_all` handshake, which is declined with an explicit "audit
+unavailable" — a session that cannot be recorded is not opened, and saying
+so beats a mystery. With auditing off, on, or failing open, tool responses
+are byte-identical.
+
+### Records
+
+One JSON object per line, schema version 1, in three kinds:
+
+- **`initialize`** — a client opened a session; carries the client's
+  self-declared name and version and the *negotiated* protocol revision.
+  Written unconditionally, with no knob to suppress it.
+- **`tool_call`** — exactly one per tool invocation, including calls that
+  were denied, refused, or aimed at a tool name that does not exist. The
+  tool listing is deliberately not recorded.
+- **`audit_gap`** — records were lost; carries how many and whether the
+  cause was a write or a rotation error. The gap is reported in the stream
+  itself, so silent loss is impossible to miss.
+
+Every record carries `v`, a millisecond-precision UTC `ts`, a per-process
+monotonic `seq` (the ordering authority — file order equals `seq` order),
+and a `session` naming the transport, the session id and, over http, the
+peer address. A `tool_call` adds the client, the request (tool name, request
+id, parameters), the outcome class and duration, and — for the tools that
+consult the guard — a `guard` object:
+
+| `guard` field | Meaning |
+|---------------|---------|
+| `verdict` | `served`, `served_filtered`, `denied` or `refused`; the worst verdict of the call wins |
+| `rule` | What decided a per-bug assessment. Alongside the policy's own rule names the guard reports its own: `default` when no rule matched, `min_bug_age_days` for the age quarantine, `<name>:unreadable-metadata` for a rule that could not be decided, `unavailable` for a bug the classification fetch could not reach. Absent where no single rule decided — a search, a refusal, the pre-dispatch gate |
+| `policy_hash` | `sha256:` over the raw policy file bytes, so a record says which policy text judged the call. Absent when no policy file is loaded |
+| `suppressed_count` | How much the response withheld: bug ids on a search or a multi-bug read, but also private comments and attachment metadata the private-content gate removed. It is the larger of the two tallies, not their sum, and it is the authoritative number — never infer a count from the id list |
+| `suppressed_ids` | The withheld bug ids, subject to the `suppressed_ids` switch |
+| `redacted_fields` | Names of what a response redacted, never values — `summary_view` for a bug served through the redacted summary view |
+| `scan` | Present on every served search, carrying how many rows the window scanned and how many it dropped, so `dropped: 0` is a statement and not an omission; absent on a search that failed and on tools that scan nothing. The counts are recorded whatever the `suppressed_ids` switch says: counts are not ids |
+
+A `tool_call` also carries `trace` when the client sends a valid W3C
+`traceparent` in the request's `_meta`, which makes the call correlatable
+with the client's own trace. The parse is strict and silent: a malformed
+value leaves the field absent, is never logged, and never influences the
+guard or the response. Schema v1 reserves an `upstream` field for
+Bugzilla-side timings; nothing emits it yet, so do not build on it.
+
+### What can never appear in a record
+
+The schema is closed — fixed structs, fixed vocabularies — and it has no
+field for the Bugzilla API key, for request headers, or for free-text bug
+content. Nothing fetched *from* Bugzilla is written: a tool result is not a
+parameter. The one open field is the request's `params`, and it is fed
+through an allowlist of client-authored keys: allowlisted values are
+recorded verbatim (strings truncated at 1024 characters), and every other
+parameter — `comment`, `summary`, `description`, `url`, `whiteboard`,
+`custom_fields`, attachment `data` — is recorded as `{"_len": N}`, its
+presence and size but never its content.
+
+```json
+{"v":1,"ts":"2026-02-03T04:05:06.789Z","seq":7,"session":{"id":"sess-1","transport":"http","remote":"192.0.2.7:52611"},"event":"tool_call","client":{"name":"example-agent","version":"1.4.2"},"request":{"tool":"bugs_quicksearch","id":"3","params":{"limit":50,"offset":0,"query":"kernel panic","status":"ALL"}},"guard":{"verdict":"served_filtered","policy_hash":"sha256:58013baa090cf77630373ab50cc5eaf2d679ec5a06e8a336600fc89b23bb8604","suppressed_count":2,"suppressed_ids":[1290040,1290041],"redacted_fields":[],"scan":{"scanned":50,"dropped":2}},"outcome":{"class":"ok","duration_ms":52}}
+```
+
+A reader of the file should skip empty lines and tolerate at most one
+unparsable line per outage: a failed write can leave a partial line, and the
+stream heals itself on the next successful record.
+
 ## Tool reference
+
+Two rules cut across the tools that name bugs. A single call may reference at
+most **25 distinct bug ids** — `bug_info`'s list, and for `update_bug_fields`
+and `update_bug_dependencies` the bug being changed plus the local bugs its
+see-also or dependency edits point at (a see-also entry on another tracker is
+neither counted nor classified, since this policy has nothing to say about
+it). And a tool that reaches a second bug (`mark_as_duplicate`,
+`update_bug_fields`, `update_bug_dependencies`) requires at least `summary`
+on that second bug, so an edit cannot confirm the existence of a bug the
+policy hides.
+
+`bug_url` and `mcp_server_info` answer from local state, and
+`quicksearch_syntax` fetches a page Bugzilla serves without credentials;
+none of the three needs an API key. Every other tool does, including
+`bugzilla_server_info`, which requires no capability but still authenticates.
 
 | Tool | What it does | Required capability |
 |------|--------------|---------------------|
-| `bug_info` | Details for a set of bug ids. Per id: full details with `read`, redacted summary with `summary`, otherwise a uniform "not accessible" entry | `read` / `summary` |
+| `bug_info` | Details for up to 25 bug ids. Per id: full details with `read`, redacted summary with `summary`, otherwise a uniform "not accessible" entry | `read` / `summary` |
 | `bug_history` | Change history of a bug, optionally only entries newer than a timestamp | `history` |
 | `bug_comments` | Comments on a bug; private comments only per the private-comment gate | `comments` |
-| `bugs_quicksearch` | Bugzilla [quicksearch](https://bugzilla.readthedocs.io/en/latest/using/finding.html#quicksearch) — the `status` filter (default `ALL`) is prefixed to the query, and under any non-empty status a number in the query is content-matched, so it also matches bugs that merely mention it; with an empty `status` the query goes to Bugzilla bare, where a query of nothing but numbers is an exact id lookup (use `bug_info` for an exact set of known ids; an all-ids query gets an advisory note saying so). Results are silently policy-filtered (denied dropped, summary-only redacted) | per result: `read` / `summary` |
-| `summarize_bug` | Returns a summarization prompt built from the bug's public comments | `comments` |
+| `bugs_quicksearch` | Bugzilla [quicksearch](https://bugzilla.readthedocs.io/en/latest/using/finding.html#quicksearch) — the `status` filter (default `ALL`) is prefixed to the query, and under any non-empty status a number in the query is content-matched, so it also matches bugs that merely mention it; with an empty `status` the query goes to Bugzilla bare, where a query of nothing but numbers is an exact id lookup (use `bug_info` for an exact set of known ids; an all-ids query gets an advisory note saying so). Paginated by `limit` (default 50) and `offset` (default 0) over the bugs the client may see. Results are silently policy-filtered (denied dropped, summary-only redacted) | per result: `read` / `summary` |
+| `summarize_bug` | Returns a summarization prompt built from the bug's public comments. Private comments are excluded unconditionally — this tool has no opt-in | `comments` |
 | `list_attachments` | Attachment metadata (never attachment content) | `attachments` |
-| `download_attachment` | Content of one attachment (raster images as image content, everything else as a base64 blob resource), capped by `max_attachment_bytes`; private attachments need the private-content double opt-in and, on download, a *missing* privacy flag counts as private | `attachments` on the owning bug |
-| `add_comment` | Add a comment to a bug | `comment` |
-| `update_bug_status` | Change status/resolution (CLOSED requires a resolution) | `status` |
+| `download_attachment` | Content of one attachment, alongside a JSON summary of its metadata: raster images (PNG, JPEG, GIF, WebP, BMP) as image content, everything else as a base64 blob resource under `bugzilla://attachment/{id}`. Capped by `max_attachment_bytes`; private attachments need the private-content double opt-in and, on download, a *missing* privacy flag counts as private | `attachments` on the owning bug |
+| `add_comment` | Add a comment to a bug, optionally private | `comment` |
+| `update_bug_status` | Change status/resolution. CLOSED requires a resolution; reopening to any status other than CLOSED or VERIFIED without naming one clears the resolution | `status` |
 | `assign_bug` | Set the assignee | `assign` |
 | `update_bug_fields` | Update priority/severity/resolution, summary, URL, whiteboard, version, target milestone, keywords and see-also links (both add/remove, never replace-all), and `cf_*` custom fields | `fields` on the bug **and** at least `summary` on every see-also target on this instance |
 | `update_bug_dependencies` | Add/remove blocks and depends_on entries | `deps` |
-| `add_cc_to_bug` | Add an email to the CC list | `cc` |
-| `mark_as_duplicate` | Close a bug as DUPLICATE of another | `status` on the bug **and** at least `summary` on the duplicate target |
+| `add_cc_to_bug` | Add an email to the CC list (the tool only adds; removal is not exposed) | `cc` |
+| `mark_as_duplicate` | Close a bug as DUPLICATE of another, with an auto-generated comment when none is given | `status` on the bug **and** at least `summary` on the duplicate target |
 | `create_bug` | File a new bug; the request is policy-checked *as described* before anything is created. A policy refusal and a Bugzilla-side failure return the same refusal text at the same cost, so a failed create never says which of the two refused, or why | `create` on the bug as requested |
-| `add_attachment` | Upload a base64-encoded attachment to a bug, capped by `max_attachment_bytes` (decoded size) | `attach` on the target bug |
+| `add_attachment` | Upload a base64-encoded attachment to a bug, optionally private or flagged as a patch, capped by `max_attachment_bytes` (decoded size) | `attach` on the target bug |
 | `bug_url` | Compute `{server}/show_bug.cgi?id={id}` locally | none (contacts nothing) |
 | `bugzilla_server_info` | Bugzilla version, extensions, timezone, time, parameters | none |
 | `quicksearch_syntax` | Bugzilla's quicksearch syntax documentation (HTML) | none |
-| `mcp_server_info` | bugwarden version, Bugzilla URL, transport, coarse policy summary | none |
+| `mcp_server_info` | This server's name and version, the Bugzilla URL, the transport, and a coarse policy summary: rule count, default action, `min_bug_age_days`, read-only flag, disabled tool names. Never a rule name or a match criterion | none |
 
 ## License
 
