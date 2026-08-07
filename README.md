@@ -144,7 +144,32 @@ cargo build --release
 
 The repository pins its Rust toolchain via `rust-toolchain.toml`; `cargo`
 picks it up automatically (rustup-managed installs). Any recent stable Rust
-works if you build without the pin.
+works if you build without the pin. The build compiles `aws-lc-sys` from
+source, so it needs a C toolchain (a C compiler and `cmake`) as well as
+Rust — this applies to `cargo install bugwarden` too, not only a source
+build.
+
+### TLS trust anchors and proxies
+
+bugwarden validates the Bugzilla server's certificate against the **OS
+trust store**, not a bundled root set. A Bugzilla instance behind a
+corporate or internal CA works as soon as that CA is installed
+system-wide — no bugwarden-side configuration is needed. The corollary: an
+environment with no CA bundle at all — a `scratch` or `distroless` image,
+some minimal base images — fails every HTTPS request to Bugzilla with a TLS
+handshake error. Install `ca-certificates` in the image, or mount the
+host's bundle into it:
+
+```dockerfile
+FROM debian:stable-slim
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+COPY bugwarden /usr/local/bin/bugwarden
+ENTRYPOINT ["/usr/local/bin/bugwarden"]
+```
+
+`HTTPS_PROXY`, `HTTP_PROXY` and `NO_PROXY` from the environment are honored
+for outbound Bugzilla traffic.
 
 ## Usage
 
