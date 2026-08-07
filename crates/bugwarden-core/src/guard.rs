@@ -1830,9 +1830,12 @@ products = ["NoView*"]
         assert!(!g.may_create(&req), "claimed groups: refused");
 
         // Every read below runs with the caller's identity KNOWN, as
-        // resolve_caller provides it in production: the "my-own-reports"
-        // rule consults created_by_me, so identity-unknown classification
-        // is a different (pinned further down) regime.
+        // resolve_caller provides it in production. The shipped file's
+        // "my-own-reports" rule (section 0b) ships commented out — see
+        // `identity_carveout_grants_own_restricted_bugs_and_blackouts_on_unknown_identity`
+        // below for that opt-in's pin — so these reads never actually
+        // consult created_by_me; the caller value only has to be threaded
+        // through BugMeta::from_json's signature.
         let caller = Some("reporter@example.com");
 
         // Issue #26: the create grant is scoped away from access, so an
@@ -1886,10 +1889,88 @@ products = ["NoView*"]
             "group-restricted desktop bugs must stay denied"
         );
 
-        // The identity carve-out ("my-own-reports"): the SAME
-        // group-restricted bug, authored by the caller, is readable —
-        // reads, comments, history and attachment listing, and nothing
-        // that writes.
+        // The identity carve-out ships DISABLED (section 0b, commented out):
+        // whoami is a fork/BMO extension, not stock Bugzilla Core v1, so the
+        // example cannot assume it exists. Consequently the SAME
+        // group-restricted bug, even authored by the caller, is denied here
+        // exactly like anyone else's — the shipped file never consults
+        // created_by_me at all. The carve-out's enabled behaviour, and its
+        // whoami-failure blackout, are pinned separately below against an
+        // inline literal that turns it on (the shipped file, with the rule
+        // commented out, cannot pin behaviour that never runs).
+        let mut own_restricted_json = restricted_foreign.clone();
+        own_restricted_json["creator"] = json!("reporter@example.com");
+        let own_restricted = BugMeta::from_json(&own_restricted_json, caller);
+        assert!(
+            matches!(
+                g.policy
+                    .classify(&own_restricted, Utc::now(), Operation::Access),
+                Access::Denied { .. }
+            ),
+            "shipped policy denies the caller's own group-restricted bug too: \
+             the my-own-reports carve-out ships commented out"
+        );
+    }
+
+    #[test]
+    fn identity_carveout_grants_own_restricted_bugs_and_blackouts_on_unknown_identity() {
+        // examples/policy.toml documents this exact rule in section 0b, an
+        // opt-in the operator uncomments only after confirming their
+        // Bugzilla answers `GET /rest/whoami` (a fork/BMO extension, absent
+        // from stock Bugzilla Core v1 — see docs/DESIGN.md, "Identity
+        // resolution", Portability). Because the shipped file ships the
+        // rule commented out, it cannot itself pin the enabled behaviour;
+        // this inline literal — "my-own-reports" ahead of a
+        // group-restricting deny rule, the shape section 0b describes —
+        // does instead. Do NOT delete this pin: it is what guards the
+        // whoami-failure blackout (I4) against a later fail-open "fix".
+        let caller = Some("reporter@example.com");
+        let toml = concat!(
+            "default_action = \"allow\"\n",
+            "\n",
+            "[[rule]]\n",
+            "name = \"my-own-reports\"\n",
+            "action = \"restrict\"\n",
+            "capabilities = [\"read\", \"comments\", \"history\", \"attachments\"]\n",
+            "operations = [\"access\"]\n",
+            "[rule.match]\n",
+            "created_by_me = true\n",
+            "\n",
+            "[[rule]]\n",
+            "name = \"group-restricted\"\n",
+            "action = \"deny\"\n",
+            "[rule.match]\n",
+            "group_restricted = true\n",
+        );
+        let g = Guard {
+            policy: policy(toml),
+        };
+
+        let restricted_foreign = json!({
+            "id": 501,
+            "summary": "totem crashes when seeking in a webm file",
+            "product": "GNOME Multimedia",
+            "component": "totem",
+            "groups": ["secteam"],
+            "keywords": [],
+            "whiteboard": "",
+            "status": "NEW",
+            "creator": "other.person@example.com",
+            "creation_time": "2020-01-01T00:00:00Z",
+        });
+        let restricted = BugMeta::from_json(&restricted_foreign, caller);
+        assert!(
+            matches!(
+                g.policy
+                    .classify(&restricted, Utc::now(), Operation::Access),
+                Access::Denied { .. }
+            ),
+            "group-restricted bugs someone else filed must stay denied"
+        );
+
+        // The identity carve-out: the SAME group-restricted bug, authored by
+        // the caller, is readable — reads, comments, history and attachment
+        // listing, and nothing that writes.
         let mut own_restricted_json = restricted_foreign.clone();
         own_restricted_json["creator"] = json!("reporter@example.com");
         let own_restricted = BugMeta::from_json(&own_restricted_json, caller);
@@ -1914,12 +1995,25 @@ products = ["NoView*"]
             );
         }
 
-        // Identity unknown (whoami failed): the my-own-reports rule cannot
-        // be decided for ANY bug it is consulted for, and an undecidable
-        // consulted rule denies (I4) — the caller's own restricted bug AND
-        // the world-readable public bug alike. This blackout is the
-        // deliberate fail-closed reading; do not "fix" it into fail-open.
-        for bug_json in [&own_restricted_json, &restricted_foreign] {
+        // Identity unknown (whoami failed, or the endpoint does not exist on
+        // this deployment): the my-own-reports rule cannot be decided for
+        // ANY bug it is consulted for, and an undecidable consulted rule
+        // denies (I4) — the caller's own restricted bug AND a world-readable
+        // public bug alike. This blackout is the deliberate fail-closed
+        // reading; do not "fix" it into fail-open.
+        let public_json = json!({
+            "id": 500,
+            "summary": "totem crashes when seeking in a webm file",
+            "product": "GNOME Multimedia",
+            "component": "totem",
+            "groups": [],
+            "keywords": [],
+            "whiteboard": "",
+            "status": "NEW",
+            "creator": "other.person@example.com",
+            "creation_time": "2020-01-01T00:00:00Z",
+        });
+        for bug_json in [&own_restricted_json, &restricted_foreign, &public_json] {
             let unknown = BugMeta::from_json(bug_json, None);
             assert!(
                 matches!(
@@ -1930,29 +2024,6 @@ products = ["NoView*"]
                 bug_json["id"]
             );
         }
-        let public_unknown = BugMeta::from_json(
-            &json!({
-                "id": 500,
-                "summary": "totem crashes when seeking in a webm file",
-                "product": "GNOME Multimedia",
-                "component": "totem",
-                "groups": [],
-                "keywords": [],
-                "whiteboard": "",
-                "status": "NEW",
-                "creator": "other.person@example.com",
-                "creation_time": "2020-01-01T00:00:00Z",
-            }),
-            None,
-        );
-        assert!(
-            matches!(
-                g.policy
-                    .classify(&public_unknown, Utc::now(), Operation::Access),
-                Access::Denied { .. }
-            ),
-            "even a world-readable desktop bug is denied while identity is unknown"
-        );
     }
 
     #[test]
