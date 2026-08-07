@@ -681,6 +681,16 @@ where every other criterion describes bug content. Decisions, all deliberate:
 - **Deliberately not implemented.** `assigned_to_me` and `cc_me` are the
   natural extensions of this mechanism; they are intentionally absent, not
   forgotten.
+- **Portability.** `GET /rest/whoami` is not in the current Bugzilla Core v1
+  REST reference (`login`, `logout`, `valid_login`, `user`, `version`,
+  `extensions`, `timezone`, `time`, `last_audit_time`, `parameters`) — it is
+  a fork/BMO extension. On a stock deployment every lookup fails, every
+  `created_by_me` criterion is `Unknown`, and I4 denies everything a
+  `created_by_me` rule is consulted for: a blackout, not a narrower grant.
+  Because of this, `examples/policy.toml` ships its `created_by_me` rule
+  ("my-own-reports") commented out — documented as an opt-in the operator
+  enables only after confirming their Bugzilla answers `whoami` — rather
+  than active by default.
 
 ## MCP tool surface (crates/bugwarden/src/server.rs)
 
@@ -1177,8 +1187,11 @@ wired, `server.rs` and `main.rs` are the reference.
   header: it parses, accepts filing into the desktop products, refuses an
   embargo-marked title everywhere, refuses filing elsewhere (omitted and
   claimed group lists alike), keeps existing world-readable desktop bugs
-  fully readable (the issue-#26 regression surface), and keeps
-  group-restricted desktop bugs denied; created_by_me — the TOML spelling
+  fully readable (the issue-#26 regression surface), keeps group-restricted
+  desktop bugs denied, and — since the "my-own-reports" identity rule ships
+  commented out (Portability, above) — denies the caller's own
+  group-restricted bug exactly like anyone else's, proving the shipped file
+  never consults `created_by_me` at all; created_by_me — the TOML spelling
   `created_by_me = true|false` is pinned and an absent key is None;
   evaluate semantics ((true, Some(true)) holds, (true, Some(false)) fails,
   (true, None) is Unknown and a consulted rule then denies for a deny rule
@@ -1191,13 +1204,16 @@ wired, `server.rs` and `main.rs` are the reference.
   when the only identity rule is operations = ["create"]; may_create
   forces created_by_me true without any client or whoami (a create-covering
   deny rule on created_by_me = true refuses creation, one on
-  created_by_me = false never matches a create); and the shipped-example
-  pin extends to identity: with the caller known, a group-restricted bug
-  the caller authored grants exactly read/comments/history/attachments and
-  no write, the same bug authored by someone else stays Denied, and with
-  identity UNKNOWN both it and a world-readable desktop bug are Denied —
-  the whoami-failure blackout is pinned so it cannot be "fixed" into
-  fail-open later.
+  created_by_me = false never matches a create); and the "my-own-reports"
+  rule's ENABLED behaviour is pinned separately, against an inline literal
+  reproducing the same rule ahead of a group-restricting deny rule (the
+  shipped file cannot pin behaviour a commented-out rule never runs): with
+  the caller known, a group-restricted bug the caller authored grants
+  exactly read/comments/history/attachments and no write, the same bug
+  authored by someone else stays Denied, and with identity UNKNOWN that
+  bug, the foreign one, and a world-readable bug are all Denied — the
+  whoami-failure blackout is pinned so it cannot be "fixed" into fail-open
+  later.
 - Unit tests (#[cfg(test)] in crates/bugwarden/src/server.rs): assemble_bug_info
   re-classification — a body embargoed after the verdict is refused, a body
   that now earns only summary is downgraded, a body granting neither read nor

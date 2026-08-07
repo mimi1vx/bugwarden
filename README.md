@@ -438,7 +438,7 @@ write two consecutive rules.
 | `summary_contains` | array of strings | case-insensitive substring search in the bug's one-line summary |
 | `group_restricted` | boolean | `true` matches bugs readable only through at least one Bugzilla group, `false` matches world-readable bugs |
 | `younger_than_days` | integer | matches bugs created within the last N days |
-| `created_by_me` | boolean | whether the API key's account authored the bug: the caller's login is resolved per request via Bugzilla's `whoami` endpoint (at most one lookup per tool call, and none at all under a policy without an access-covering `created_by_me` rule — a rule scoped to `operations = ["create"]` alone never triggers a lookup) and compared case-insensitively to the bug's creator. `true` matches the caller's own reports, `false` everyone else's. An unresolvable identity (`whoami` failure) makes the criterion **unknown**, which denies (see Unreadable metadata). In the create gate the prospective bug always counts as created by the caller — no lookup happens there. Older bugwarden versions reject a policy using this key at startup (strict parsing fails closed) |
+| `created_by_me` | boolean | whether the API key's account authored the bug: the caller's login is resolved per request via Bugzilla's `whoami` endpoint (at most one lookup per tool call, and none at all under a policy without an access-covering `created_by_me` rule — a rule scoped to `operations = ["create"]` alone never triggers a lookup) and compared case-insensitively to the bug's creator. `true` matches the caller's own reports, `false` everyone else's. **`whoami` is not part of stock Bugzilla Core v1** — it is a fork/BMO extension — so on a deployment without it every lookup fails. An unresolvable identity (`whoami` failure or absence) makes the criterion **unknown**, which denies (see Unreadable metadata); a policy that consults this criterion therefore denies everything it reaches on such a deployment. In the create gate the prospective bug always counts as created by the caller — no lookup happens there. Older bugwarden versions reject a policy using this key at startup (strict parsing fails closed) |
 
 #### Unreadable metadata
 
@@ -447,14 +447,16 @@ of an unexpected type, or a list with an element the parser cannot read. Such
 a field is **unknown**, and a rule that consults one is undecidable: it neither
 holds nor fails. One criterion needs more than the bug object:
 `created_by_me` also needs the caller's identity, and if either half is
-missing — an unreadable creator, or a `whoami` lookup that failed — it is
-just as undecidable and resolves the same way. A policy consulting identity
-therefore denies everything its identity rules are consulted for while
-`whoami` is failing; that is deliberate (treating unknown identity as "does
-not match" would let a `created_by_me` deny rule be defeated by breaking
-`whoami`). The criterion cannot widen exposure beyond the credential:
-Bugzilla enforces its own permissions on every fetch, so an authorship rule
-only surfaces bugs the API key could already read.
+missing — an unreadable creator, or a `whoami` lookup that failed or does
+not exist on the deployment — it is just as undecidable and resolves the
+same way. A policy consulting identity therefore denies everything its
+identity rules are consulted for while `whoami` is unavailable — including
+permanently, on a stock Bugzilla Core v1 deployment that never exposes it;
+that is deliberate (treating unknown identity as "does not match" would let
+a `created_by_me` deny rule be defeated by breaking `whoami`). The criterion
+cannot widen exposure beyond the credential: Bugzilla enforces its own
+permissions on every fetch, so an authorship rule only surfaces bugs the API
+key could already read.
 
 bugwarden resolves an undecidable rule by **denying the bug**, whatever the
 rule's action. A `deny` rule denies because the bug may well be what it was

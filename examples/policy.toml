@@ -3,25 +3,22 @@
 #
 # The scenario this file implements:
 #
-#   * the caller's OWN bug reports — bugs authored by the account whose API
-#     key makes the request — are always readable (read, comments, history,
-#     attachments; no writes), even when a rule below would hide them: see
-#     "my-own-reports" in section 0b, an explicit opt-in that is evaluated
-#     before every deny rule and comes with a documented whoami-failure
-#     blackout;
-#   * undisclosed (embargoed) security bugs are otherwise completely
-#     invisible;
+#   * undisclosed (embargoed) security bugs are completely invisible;
 #   * so is every other bug that is not world-readable — see rule 1, which
 #     is deliberately broader than "security" and can be narrowed;
 #   * bugs in groups NAMED like security groups are invisible in their own
-#     right (except the caller's own — section 0b matches first) — see
-#     "security-groups", which keeps denying them even after rule 1 is
-#     narrowed or removed;
+#     right — see "security-groups", which keeps denying them even after
+#     rule 1 is narrowed or removed;
 #   * bugs labelled "security" are invisible while they are fresher than
-#     5 days (the window in which details are typically still unreviewed),
-#     again excepting the caller's own;
-#   * every other bug (not the caller's own — those take the read-only
-#     grant of "my-own-reports" first) is shown to the user in full;
+#     5 days (the window in which details are typically still unreviewed);
+#   * every other bug is shown to the user in full;
+#   * OPTIONAL, SHIPPED DISABLED: the caller's OWN bug reports — bugs
+#     authored by the account whose API key makes the request — can be made
+#     always readable (read, comments, history, attachments; no writes),
+#     even where a rule above would hide them. This needs a Bugzilla that
+#     exposes an identity endpoint (stock Bugzilla Core v1 does not — see
+#     section 0b) and comes with a documented identity-failure blackout, so
+#     it ships commented out rather than enabled by default;
 #   * new bug reports are accepted into the desktop products ONLY — see the
 #     "reporters" rule in section 0, whose `operations = ["create"]` scope
 #     grants filing without touching what may be read — except that a title
@@ -156,27 +153,42 @@ operations = ["create"]
 products = ["GNOME*", "KDE*"]
 
 # ---------------------------------------------------------------------------
-# 0b. The caller's own reports: readable even where the rules below would
-#     hide them.
+# 0b. OPTIONAL, SHIPPED DISABLED: the caller's own reports, readable even
+#     where the rules below would hide them.
 #
-# `created_by_me = true` matches bugs AUTHORED by the account whose API key
-# makes the request — the one identity-relative criterion. The server
-# resolves the caller's login at most once per tool call (GET /rest/whoami,
-# only when a policy actually uses this criterion) and compares it
-# case-insensitively against the bug's creator. Placed ABOVE the deny rules,
-# this rule carves the caller's own reports out of them: people keep
-# following the bugs they themselves filed — group-restricted ones included
-# — while everyone else's hidden bugs stay hidden. Reading is granted,
-# writing is not, so "follow your own report" does not become "edit your
-# own report". Note the flip side of first-match-wins: the caller's own
-# WORLD-READABLE bugs also take this rule first and are therefore read-only
-# through this server under this example.
+# PREREQUISITE, CHECK THIS FIRST: this rule needs a Bugzilla deployment that
+# exposes an identity endpoint. The current Bugzilla Core v1 REST reference
+# does not define `/rest/whoami` — it is a fork/BMO extension (see
+# docs/DESIGN.md, "Identity resolution", Portability) — so on a stock
+# instance every lookup fails, the caller's identity is always unknown, and
+# — per the fail-closed behaviour below — this rule alone denies EVERY
+# access classification it is consulted for the moment it is enabled. That
+# is why this rule ships commented out rather than active: an example file
+# cannot know whether the operator's Bugzilla has the endpoint, and enabling
+# it against one that does not is a silent blackout, not a carve-out.
+# Confirm your deployment answers `GET /rest/whoami` before uncommenting the
+# `[[rule]]` block below.
 #
-# This rule is an EXPLICIT OPT-IN — an operator who does not want it simply
-# omits it and keeps today's behaviour. In particular, a deployment whose
-# clients share one service-account API key should NOT carry this rule:
-# there, "created by me" means "created by the service account", a set of
-# bugs no individual user has a personal claim to.
+# Once confirmed, `created_by_me = true` matches bugs AUTHORED by the
+# account whose API key makes the request — the one identity-relative
+# criterion. The server resolves the caller's login at most once per tool
+# call (GET /rest/whoami, only when a policy actually uses this criterion)
+# and compares it case-insensitively against the bug's creator. Placed
+# ABOVE the deny rules, this rule carves the caller's own reports out of
+# them: people keep following the bugs they themselves filed —
+# group-restricted ones included — while everyone else's hidden bugs stay
+# hidden. Reading is granted, writing is not, so "follow your own report"
+# does not become "edit your own report". Note the flip side of
+# first-match-wins: the caller's own WORLD-READABLE bugs also take this
+# rule first and are therefore read-only through this server under this
+# example.
+#
+# This rule is an EXPLICIT OPT-IN even where the endpoint exists — an
+# operator who does not want it simply leaves it commented out and keeps
+# today's behaviour. In particular, a deployment whose clients share one
+# service-account API key should NOT enable this rule: there, "created by
+# me" means "created by the service account", a set of bugs no individual
+# user has a personal claim to.
 #
 # The `operations = ["access"]` scope matters: the create gate treats a
 # prospective bug as created by the caller (the account filing a bug IS its
@@ -189,11 +201,12 @@ products = ["GNOME*", "KDE*"]
 # Failure mode, deliberate: if the whoami lookup fails, the caller's
 # identity is unknown, this rule can be decided for NO bug, and an
 # undecidable consulted rule denies whatever its action (see "Unreadable
-# metadata" above). While whoami is down, a policy that leads with this
-# rule therefore denies every read — a blackout — rather than serving what
-# an unverified identity should not see. That is the only uniformly
-# fail-closed reading: treating unknown identity as "criterion fails"
-# would let a created_by_me deny rule be dodged by making whoami fail.
+# metadata" above). While whoami is down (or simply absent — see the
+# prerequisite above), a policy that leads with this rule therefore denies
+# every read — a blackout — rather than serving what an unverified identity
+# should not see. That is the only uniformly fail-closed reading: treating
+# unknown identity as "criterion fails" would let a created_by_me deny rule
+# be dodged by making whoami fail.
 #
 # This criterion cannot widen exposure beyond the credential: Bugzilla
 # still enforces its own permissions on every fetch, so an authorship rule
@@ -204,18 +217,21 @@ products = ["GNOME*", "KDE*"]
 # `created_by_me` at startup — parsing is strict, so the whole file fails
 # closed instead of the rule being silently ignored.
 
-[[rule]]
-name = "my-own-reports"
-description = "Bugs the caller's own account filed stay readable, never writable"
-action = "restrict"
-capabilities = ["read", "comments", "history", "attachments"]
-operations = ["access"]
-[rule.match]
-created_by_me = true
+# Uncomment the block below ONLY after confirming your Bugzilla answers
+# GET /rest/whoami (see the prerequisite above).
+#[[rule]]
+#name = "my-own-reports"
+#description = "Bugs the caller's own account filed stay readable, never writable"
+#action = "restrict"
+#capabilities = ["read", "comments", "history", "attachments"]
+#operations = ["access"]
+#[rule.match]
+#created_by_me = true
 
 # ---------------------------------------------------------------------------
 # 1. Undisclosed security bugs: fully invisible, at any age (the caller's
-#    own excepted, as everywhere below — section 0b matches first).
+#    own excepted too, as everywhere below, if the optional section 0b
+#    carve-out is enabled — it matches first).
 #
 # An issue under embargo is one whose public disclosure date has not arrived
 # yet, and it is normally recognisable two ways, independently: the bug is
@@ -297,18 +313,17 @@ keywords = ["security-embargo", "embargo*"]
 #
 # Both criteria are AND-ed, so these rules hide a bug only while it is BOTH
 # security-labelled AND younger than 5 days. Once a world-readable bug ages
-# past the window, no deny rule matches it any more: unless it is the
-# caller's own (then "my-own-reports" grants it read-only, as at any age),
-# default_action ("allow") applies and it becomes fully visible without any
-# policy change. (A group-restricted bug someone else filed stays hidden at
-# any age: rule 1 catches it first. The caller's own group-restricted bugs
-# take "my-own-reports" first instead — readable, never writable.)
+# past the window, no deny rule matches it any more and default_action
+# ("allow") applies, so it becomes fully visible without any policy change.
+# (A group-restricted bug someone else filed stays hidden at any age: rule 1
+# catches it first. If the optional "my-own-reports" carve-out from section
+# 0b is enabled, the caller's own bugs — group-restricted or not — take that
+# rule first instead: readable, never writable, at any age.)
 #
 # Two rules because "security" can be expressed two ways here; drop the one
 # your instance does not use. A group-based variant would be pointless: any
 # bug in a security group that someone else filed is already denied by
-# rule 1, and the caller's own are already carved out by "my-own-reports",
-# group-based rule or not.
+# rule 1 regardless.
 # ---------------------------------------------------------------------------
 
 [[rule]]
