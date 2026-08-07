@@ -553,6 +553,23 @@ is likewise required, not cosmetic: `apply_auth`'s `?api_key=` mode and
 `quicksearch_syntax_html` both call `.query(...)`, a compile error without
 the feature in 0.13.
 
+The operator cost of that switch (issue #65): a deployment with no OS trust
+store fails every HTTPS request at first contact with Bugzilla, where the
+previous release succeeded from bundled `webpki-roots`, and the symptom is a
+TLS handshake error that does not name the missing CA bundle — nothing in
+the error points at `ca-certificates`. The fix is the operator's to make:
+install `ca-certificates` in the image, or mount the host's bundle into it;
+the project ships tarballs, not container images, so containerizing the
+binary is a choice made downstream of this repo, without the person making
+it necessarily knowing the trust-store dependency exists. The rejected
+alternative is keeping the bundled Mozilla roots: rejected because a
+distro-packaged tool has to follow the system CA bundle — an admin adding or
+revoking a root must take effect without a bugwarden rebuild — and because
+bundled roots cannot see the internal CA that the target Bugzilla
+deployments sit behind. Re-evaluate only if this project ever ships its own
+container image, where the bundle would be under our control instead of the
+operator's.
+
 **Caller identity on the wire (issue #55).** Every request carries a
 `User-Agent`, set once on the shared `reqwest::Client` so it reaches the
 authenticated REST calls and the unauthenticated `page.cgi` fetch alike.
