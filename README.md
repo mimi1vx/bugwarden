@@ -89,8 +89,9 @@ is `bug_url`, which computes a URL string locally and contacts nothing.
   sets `allow_private_comments = true` **and** the individual call opts in
   with `include_private = true`. Either alone is not enough.
 - **Custom fields cannot smuggle writes.** `update_bug_fields.custom_fields`
-  accepts only keys starting with `cf_`; anything else (e.g. `groups`, `cc`,
-  `assigned_to`) is rejected before Bugzilla is contacted.
+  and `create_bug.custom_fields` accept only keys starting with `cf_`;
+  anything else (e.g. `groups`, `cc`, `assigned_to`) is rejected before
+  Bugzilla is contacted.
 - **The API key never leaks.** The Bugzilla API key is never written to logs,
   error messages, or tool results; HTTP errors are sanitized so that a key
   passed as a URL query parameter cannot appear in error text.
@@ -104,8 +105,8 @@ is `bug_url`, which computes a URL string locally and contacts nothing.
 - **Private comments default to off.** The default policy has
   `allow_private_comments = false`, so a policy file is required to enable
   them.
-- **`update_bug_fields` custom fields are restricted** to `cf_*` keys as
-  described above.
+- **`update_bug_fields` and `create_bug` custom fields are restricted** to
+  `cf_*` keys as described above.
 
 ## Installation
 
@@ -528,7 +529,7 @@ implied.
 | `assign` | write | changing the assignee |
 | `cc` | write | modifying the CC list |
 | `deps` | write | changing blocks/depends_on |
-| `create` | write | filing a new bug — judged against the bug *as requested*, so a rule that hides a product by name also refuses filing into it. The request's `groups` claim is never trusted (Bugzilla adds mandatory groups server-side), so **a rule consulting `groups` or `group_restricted` refuses every create request that reaches it** — to accept new bugs under such a policy, grant `create` in a rule scoped with `operations = ["create"]` placed before the group-consulting rules; being create-scoped, the grant leaves reads of existing bugs untouched, and without such a grant the policy refuses all bug filing |
+| `create` | write | filing a new bug, including `cf_*` custom fields — judged against the bug *as requested*, so a rule that hides a product by name also refuses filing into it. The request's `groups` claim is never trusted (Bugzilla adds mandatory groups server-side), so **a rule consulting `groups` or `group_restricted` refuses every create request that reaches it** — to accept new bugs under such a policy, grant `create` in a rule scoped with `operations = ["create"]` placed before the group-consulting rules; being create-scoped, the grant leaves reads of existing bugs untouched, and without such a grant the policy refuses all bug filing |
 | `attach` | write | uploading an attachment to a bug |
 
 When the server is read-only (policy or CLI), the eight write capabilities
@@ -682,7 +683,7 @@ none of the three needs an API key. Every other tool does, including
 | `update_bug_dependencies` | Add/remove blocks and depends_on entries | `deps` |
 | `add_cc_to_bug` | Add an email to the CC list (the tool only adds; removal is not exposed) | `cc` |
 | `mark_as_duplicate` | Close a bug as DUPLICATE of another, with an auto-generated comment when none is given | `status` on the bug **and** at least `summary` on the duplicate target |
-| `create_bug` | File a new bug; the request is policy-checked *as described* before anything is created. A policy refusal and a Bugzilla-side failure return the same refusal text at the same cost, so a failed create never says which of the two refused, or why | `create` on the bug as requested |
+| `create_bug` | File a new bug, including `cf_*` custom fields; the request is policy-checked *as described* before anything is created. A policy refusal and a Bugzilla-side failure return the same refusal text at the same cost, so a failed create never says which of the two refused, or why | `create` on the bug as requested |
 | `add_attachment` | Upload a base64-encoded attachment to a bug, optionally private or flagged as a patch, capped by `max_attachment_bytes` (decoded size) | `attach` on the target bug |
 | `bug_url` | Compute `{server}/show_bug.cgi?id={id}` locally | none (contacts nothing) |
 | `bugzilla_server_info` | Bugzilla version, extensions, timezone, time, parameters | none |

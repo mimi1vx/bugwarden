@@ -1719,6 +1719,27 @@ products = ["NoView*"]
     }
 
     #[test]
+    fn may_create_verdict_is_unchanged_by_custom_fields() {
+        // No Matcher criterion reads cf_* (see policy::Matcher), so a
+        // prospective bug's custom fields cannot move it between rules —
+        // unlike product/component, which DESIGN.md deliberately withholds
+        // from create-time reclassification.
+        let g = Guard {
+            policy: policy(concat!(
+                "[[rule]]\nname = \"hide-security\"\naction = \"deny\"\n",
+                "[rule.match]\nproducts = [\"Security*\"]\n",
+            )),
+        };
+        let mut allowed = create_request("openSUSE");
+        allowed["cf_secret_field"] = json!("hidden");
+        assert!(g.may_create(&allowed));
+
+        let mut denied = create_request("Security Response");
+        denied["cf_secret_field"] = json!("hidden");
+        assert!(!g.may_create(&denied));
+    }
+
+    #[test]
     fn may_create_never_lets_the_claimed_group_list_decide() {
         // Bugzilla UNIONS the product's mandatory groups into whatever the
         // request named, so the created bug can be in groups the request

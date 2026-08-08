@@ -235,6 +235,44 @@ async fn create_bug_success_reaches_bugzilla_untouched() {
 }
 
 #[tokio::test]
+async fn create_bug_custom_field_reaches_the_post_body() {
+    let mock = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/rest/bug"))
+        .and(body_partial_json(json!({ "cf_fixed_in": "1.2.3" })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "id": 4243 })))
+        .expect(1)
+        .mount(&mock)
+        .await;
+    let client = client_for("", &mock).await;
+    let mut args = create_args("openSUSE");
+    args["custom_fields"] = json!({ "cf_fixed_in": "1.2.3" });
+    let result = call(&client, "create_bug", args).await;
+    assert!(!is_error(&result), "a cf_* key must reach the POST body");
+}
+
+#[tokio::test]
+async fn create_bug_rejects_non_cf_custom_keys_with_no_upstream_request() {
+    // I7, same gate as update_bug_fields: a non-cf_ key must not smuggle a
+    // write through the generic create payload, and the refusal must cost
+    // zero upstream requests — it decides nothing about the policy.
+    let mock = MockServer::start().await;
+    let client = client_for("", &mock).await;
+    let mut args = create_args("openSUSE");
+    args["custom_fields"] = json!({ "assigned_to": "someone@example.org" });
+    let result = call(&client, "create_bug", args).await;
+    assert!(is_error(&result));
+    assert_eq!(
+        text_of(&result),
+        "Invalid custom field 'assigned_to': custom field names must start with 'cf_'"
+    );
+    assert!(
+        mock.received_requests().await.unwrap().is_empty(),
+        "the cf_ gate must refuse before any upstream request (I7)"
+    );
+}
+
+#[tokio::test]
 async fn create_bug_claimed_groups_never_defeat_a_group_rule() {
     // The canonical embargo pattern: the policy denies on group names, and
     // Bugzilla UNIONS the product's mandatory groups into whatever the

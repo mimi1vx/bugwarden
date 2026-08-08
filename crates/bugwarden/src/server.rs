@@ -966,6 +966,10 @@ pub struct CreateBugParams {
     /// Groups to restrict the new bug to.
     #[serde(default)]
     pub groups: Vec<String>,
+    /// Custom fields, e.g. {"cf_fixed_in": "1.2.3"}. Keys must start with
+    /// 'cf_'.
+    #[serde(default)]
+    pub custom_fields: Option<JsonObject>,
 }
 
 #[derive(Debug, serde::Deserialize, schemars::JsonSchema)]
@@ -1984,7 +1988,7 @@ impl BugWarden {
     }
 
     #[tool(
-        description = "File a new bug. The bug is checked against server policy AS DESCRIBED before it is created, so a product or component the policy withholds cannot be filed into either. Returns the new bug id on success.",
+        description = "File a new bug. The bug is checked against server policy AS DESCRIBED before it is created, so a product or component the policy withholds cannot be filed into either. Accepts custom 'cf_*' fields for products with mandatory entry fields. Returns the new bug id on success.",
         annotations(
             read_only_hint = false,
             destructive_hint = false,
@@ -2000,6 +2004,7 @@ impl BugWarden {
         tracing::info!(
             product = %p.product,
             component = %p.component,
+            custom_field_count = p.custom_fields.as_ref().map_or(0, |cf| cf.len()),
             "tool: create_bug"
         );
         let key = self.api_key(&ctx)?;
@@ -2027,6 +2032,25 @@ impl BugWarden {
         }
         if !p.groups.is_empty() {
             payload.insert("groups".to_string(), json!(p.groups));
+        }
+        if let Some(custom_fields) = &p.custom_fields {
+            // I7: only cf_* keys may pass through, same gate as
+            // update_bug_fields. This early error is safe even though the
+            // create refusal must otherwise stay padded and uniform: its
+            // outcome is a pure function of the client's own key names, not
+            // of policy or upstream state, so it discloses nothing about
+            // either.
+            for k in custom_fields.keys() {
+                if !k.starts_with("cf_") {
+                    note_refused(&ctx);
+                    return Ok(err_text(format!(
+                        "Invalid custom field '{k}': custom field names must start with 'cf_'"
+                    )));
+                }
+            }
+            for (k, v) in custom_fields {
+                payload.insert(k.clone(), v.clone());
+            }
         }
         let payload = Value::Object(payload);
 
