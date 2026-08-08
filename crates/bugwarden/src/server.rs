@@ -1064,6 +1064,76 @@ impl BugWarden {
         self
     }
 
+    /// Turn a silent identity blackout into a loud startup failure.
+    ///
+    /// `Guard::resolve_caller` maps every `whoami` failure to `None`, and
+    /// I4 then denies every classification a `created_by_me` rule is
+    /// consulted for (see DESIGN.md, "Identity resolution") — correct, but
+    /// invisible: the server starts, looks healthy, and blacks out
+    /// silently. This probes the SAME endpoint once, before the server
+    /// serves a single tool call, so a deployment missing it (stock
+    /// Bugzilla Core v1 does not define `/rest/whoami`) fails to start
+    /// with a reason instead of failing open-looking-closed.
+    ///
+    /// Deliberately kept OUT of [`BugWarden::new`], which is sync and is
+    /// the construction path every integration test drives: moving the
+    /// probe there would give every one of those tests an unwanted
+    /// `whoami` call to account for. Call this once, after `new`, before
+    /// opening the audit sink (a failed preflight must not create or
+    /// rotate an audit file).
+    ///
+    /// Behaviour, by key custody:
+    /// - the policy consults no identity (`!Policy::needs_identity()`):
+    ///   `Ok(())` with ZERO upstream requests — the laziness contract
+    ///   (DESIGN.md) now covers startup too, not just tool calls;
+    /// - [`KeyCustody::Server`]: one `GET /rest/whoami`. Success logs the
+    ///   resolved login at `info!` and returns `Ok(())`; failure bails,
+    ///   naming the endpoint, that stock Bugzilla Core v1 does not define
+    ///   it, and that starting anyway would deny every access
+    ///   classification the policy's identity rules reach. The sanitized
+    ///   client error (I12: `whoami` already strips the URL) is attached
+    ///   as the error's source;
+    /// - [`KeyCustody::PerRequest`]: there is no server-held key to probe
+    ///   with — each caller authenticates, and therefore resolves
+    ///   identity, on their own request. `warn!` the same compatibility
+    ///   statement and return `Ok(())`: per-request custody stays
+    ///   correct per call (DESIGN.md, "Identity resolution"), it is only
+    ///   unverifiable up front.
+    pub async fn preflight(&self) -> anyhow::Result<()> {
+        use anyhow::Context as _;
+
+        if !self.guard.policy.needs_identity() {
+            return Ok(());
+        }
+        match &self.key_custody {
+            KeyCustody::Server(key) => match self.bz.whoami(key).await {
+                Ok(login) => {
+                    tracing::info!(login, "identity endpoint verified");
+                    Ok(())
+                }
+                Err(err) => Err(err).context(
+                    "GET /rest/whoami failed during startup preflight; the guard policy \
+                     consults created_by_me, which needs this endpoint to resolve the \
+                     caller's identity. Stock Bugzilla Core v1 does not define /rest/whoami \
+                     (it is a fork/BMO extension) — if this deployment does not have it, \
+                     starting anyway would deny every access classification the policy's \
+                     identity rules reach (I4). Confirm the endpoint exists, or remove the \
+                     created_by_me criteria from the policy",
+                ),
+            },
+            KeyCustody::PerRequest => {
+                tracing::warn!(
+                    "the policy consults created_by_me, but per-request key custody holds no \
+                     server-side key to verify /rest/whoami with at startup; each caller's \
+                     identity is still resolved per call, but an unreachable endpoint on this \
+                     deployment will only surface as a denial once a tool is called — stock \
+                     Bugzilla Core v1 does not define /rest/whoami (it is a fork/BMO extension)"
+                );
+                Ok(())
+            }
+        }
+    }
+
     /// The session an audit record belongs to. http: the server-assigned
     /// `mcp-session-id` header and, when the listener was built with
     /// connect-info, the remote peer address — both from the HTTP request
