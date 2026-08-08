@@ -508,6 +508,9 @@ impl BugzillaClient {
     pub async fn quicksearch_syntax_html(&self) -> anyhow::Result<String>;
     pub async fn attachment_meta(&self, key: &str, attachment_id: u64) -> anyhow::Result<Option<serde_json::Value>>; // exclude_fields=data
     pub async fn attachment_data(&self, key: &str, attachment_id: u64) -> anyhow::Result<Option<serde_json::Value>>; // includes base64 `data`
+    pub async fn enterable_product_ids(&self, key: &str) -> anyhow::Result<Vec<u64>>; // .ids, string or number, both accepted
+    pub async fn products(&self, key: &str, ids: &[u64], names: &[&str], include_fields: Option<&[&str]>) -> anyhow::Result<serde_json::Value>;
+    pub async fn bug_fields(&self, key: &str, name: Option<&str>) -> anyhow::Result<serde_json::Value>; // name is percent-encoded as one path segment
 }
 ```
 
@@ -531,6 +534,9 @@ Endpoint mapping:
 | attachment_meta | GET /rest/bug/attachment/{attachment_id}?exclude_fields=data | `envelope.attachments.{id}` object, `None` when absent |
 | attachment_data | GET /rest/bug/attachment/{attachment_id} | `envelope.attachments.{id}` object incl. base64 `data`, `None` when absent |
 | quicksearch_syntax_html | GET {base_url}/page.cgi?id=quicksearch.html (no auth needed) | HTML string |
+| enterable_product_ids | GET /rest/product_enterable | `.ids` as `Vec<u64>`; every element must parse as a numeric string or a JSON number, else error |
+| products | GET /rest/product?ids=..&names=..[&include_fields=..] (any of the three may be empty/absent) | whole envelope (`{"products":[..]}`), raw — no local projection at this layer |
+| bug_fields | GET /rest/field/bug, or /rest/field/bug/{name} with `name` percent-encoded as one path segment (`Url::path_segments_mut`, never string-interpolated) | whole envelope (`{"fields":[..]}`) |
 
 Auth per request: `use_auth_header` ? header `Authorization: Bearer {key}` :
 query param `api_key={key}`. Always `Accept: application/json`.
