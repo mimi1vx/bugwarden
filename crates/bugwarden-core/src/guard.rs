@@ -830,8 +830,19 @@ impl Guard {
             Ok(login) => Some(login),
             Err(err) => {
                 // Sanitized by the client (I12); identity stays unknown and
-                // every consulted identity rule fails closed (I4).
-                tracing::debug!(error = %err, "whoami failed; caller identity unresolved");
+                // every consulted identity rule fails closed (I4). warn!,
+                // not debug!: under per-request key custody this per-call
+                // failure is the only diagnosis available (server-held
+                // custody also gets a startup preflight — see
+                // `BugWarden::preflight`) — a server that starts and then
+                // silently denies everything is exactly the blackout this
+                // is meant to surface.
+                tracing::warn!(
+                    error = %err,
+                    "whoami failed; caller identity unresolved (this endpoint may not exist \
+                     on this deployment — stock Bugzilla Core v1 does not define \
+                     /rest/whoami)"
+                );
                 None
             }
         }

@@ -60,6 +60,11 @@ async fn main() -> anyhow::Result<()> {
     let cfg = Arc::new(cli);
     let server =
         server::BugWarden::new(cfg.clone(), guard, bz).context("failed to build the MCP server")?;
+    // Turns a silent whoami-blackout (I4 denying every created_by_me
+    // classification) into an actionable startup failure. Before the audit
+    // sink below: a failed preflight must not create or rotate an audit
+    // file (the same ordering rationale as key custody resolution above).
+    server.preflight().await?;
 
     // Audit stream, when configured. The fail mode falls back to the
     // transport-derived default; the policy digest ties every record to

@@ -690,7 +690,9 @@ where every other criterion describes bug content. Decisions, all deliberate:
   Because of this, `examples/policy.toml` ships its `created_by_me` rule
   ("my-own-reports") commented out — documented as an opt-in the operator
   enables only after confirming their Bugzilla answers `whoami` — rather
-  than active by default.
+  than active by default. `BugWarden::preflight` (see "MCP tool surface")
+  turns an unconfirmed deployment into a loud startup failure instead of a
+  silent per-call blackout.
 
 ## MCP tool surface (crates/bugwarden/src/server.rs)
 
@@ -752,6 +754,36 @@ units and container specs). Decisions, all deliberate:
   `tracing::warn` recommending 0600 (the read-bit analogue of the policy
   file's write-bit warning). The startup log line states mode and source
   only — never key material (I12).
+
+### Identity preflight (`BugWarden::preflight`)
+
+`Guard::resolve_caller` maps every `whoami` failure to `None`, and I4 then
+denies every classification a `created_by_me` rule reaches (see "Identity
+resolution") — correct, but silent: the server starts, looks healthy, and
+blacks out every access classification those rules cover while the cause
+sits at `tracing::warn!` on the first tool call. `preflight()` probes the
+same endpoint once, BEFORE the server serves a tool call, so a deployment
+that cannot answer it fails to start with a named reason instead.
+
+Deliberately a separate `async fn`, not folded into the sync
+`BugWarden::new`: `new` is the construction path every integration test in
+`tools_wiremock.rs`/`http_transport_wiremock.rs` drives, and moving the
+probe there would give each of those tests an unaccounted-for `whoami`
+call. `main.rs` calls `server.preflight().await?` right after `new`, BEFORE
+the audit sink is opened — the same ordering rationale as key custody
+resolution: a failed preflight must not create or rotate an audit file.
+
+Behaviour, by `Policy::needs_identity()` and key custody:
+
+| `needs_identity()` | custody | preflight does |
+|---|---|---|
+| false | any | `Ok(())`, ZERO upstream requests — the laziness contract now covers startup too |
+| true | `Server(key)` | one `GET /rest/whoami`; success logs the resolved login at `info!` and returns `Ok(())`; failure `anyhow::bail!`s naming the endpoint, that stock Bugzilla Core v1 does not define it, and that starting anyway would deny every access classification the policy's identity rules reach (I4) |
+| true | `PerRequest` | `tracing::warn!` the same compatibility statement and return `Ok(())` — there is no server-held key to probe with (A5); each caller still resolves identity correctly per call, an unreachable endpoint here only surfaces as a denial once a tool is called |
+
+The failure path attaches the sanitized client error (I12: `whoami`
+already strips the URL) as the `anyhow` error's source/context — no key
+material reaches the bailed-out message either.
 
 Tool descriptions: concise and action-oriented; state the defaults and
 constraints the model must know.
@@ -1312,6 +1344,17 @@ wired, `server.rs` and `main.rs` are the reference.
   own reports POSTs the comment for the caller's bug and refuses a
   foreign one with nothing POSTed), and a whoami transport error leaking
   no API key into any client-visible text (I12).
+- Integration tests (crates/bugwarden/tests/preflight_wiremock.rs,
+  wiremock): `BugWarden::preflight` — a missing `/rest/whoami` under
+  server-held key custody plus an identity-consulting policy fails
+  preflight naming `GET /rest/whoami` and `created_by_me`; a working
+  `whoami` under the same custody/policy passes it (one request, verified
+  by the mock's drop-time expectation); a policy without any identity
+  criterion costs ZERO whoami requests at preflight (the laziness contract
+  extends to startup); `KeyCustody::PerRequest` under an identity policy
+  passes preflight (warn only) while issuing zero whoami requests, since
+  there is no server-held key to verify it with (A5); and a transport-level
+  whoami failure leaks no API key into the preflight error text (I12).
 - Integration tests (crates/bugwarden/tests/http_transport_wiremock.rs,
   wiremock + rmcp client over REAL streamable HTTP — the only harness in
   which the per-request key header physically exists; the wiremock upstream
