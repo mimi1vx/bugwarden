@@ -1079,6 +1079,109 @@ async fn update_fields_all_empty_call_errors_without_calling_bugzilla() {
     );
 }
 
+/// Read the sole PUT body received by `mock`, asserting exactly one PUT
+/// reached it. Used to assert *absence* of keys, not just presence.
+async fn sole_put_body(mock: &MockServer) -> Value {
+    mock.received_requests()
+        .await
+        .unwrap()
+        .iter()
+        .find(|r| r.method == wiremock::http::Method::PUT)
+        .map(|r| serde_json::from_slice(&r.body).expect("PUT body is JSON"))
+        .expect("one PUT reached the mock")
+}
+
+#[tokio::test]
+async fn update_bug_status_without_resolution_omits_it_from_the_wire() {
+    // Bugzilla rejects a synthesised "resolution":"" on RESOLVED
+    // (missing_resolution); the tool must not send it.
+    let mock = MockServer::start().await;
+    mount_classify(&mock, world_readable_bug(7)).await;
+    mount_update_put(&mock, json!({ "status": "RESOLVED" })).await;
+    let client = client_for("", &mock).await;
+    let result = call(
+        &client,
+        "update_bug_status",
+        json!({ "bug_id": 7, "status": "RESOLVED" }),
+    )
+    .await;
+    assert!(!is_error(&result), "result: {}", text_of(&result));
+    assert_eq!(sole_put_body(&mock).await, json!({ "status": "RESOLVED" }));
+}
+
+#[tokio::test]
+async fn update_bug_status_with_resolution_sends_both() {
+    let mock = MockServer::start().await;
+    mount_classify(&mock, world_readable_bug(7)).await;
+    mount_update_put(
+        &mock,
+        json!({ "status": "RESOLVED", "resolution": "FIXED" }),
+    )
+    .await;
+    let client = client_for("", &mock).await;
+    let result = call(
+        &client,
+        "update_bug_status",
+        json!({ "bug_id": 7, "status": "RESOLVED", "resolution": "FIXED" }),
+    )
+    .await;
+    assert!(!is_error(&result), "result: {}", text_of(&result));
+    assert_eq!(
+        sole_put_body(&mock).await,
+        json!({ "status": "RESOLVED", "resolution": "FIXED" })
+    );
+}
+
+#[tokio::test]
+async fn update_bug_status_closed_without_resolution_reaches_upstream() {
+    // There is no local CLOSED pre-check any more: the request reaches
+    // Bugzilla, which is free to accept or reject it (missing_resolution).
+    let mock = MockServer::start().await;
+    mount_classify(&mock, world_readable_bug(7)).await;
+    mount_update_put(&mock, json!({ "status": "CLOSED" })).await;
+    let client = client_for("", &mock).await;
+    let result = call(
+        &client,
+        "update_bug_status",
+        json!({ "bug_id": 7, "status": "CLOSED" }),
+    )
+    .await;
+    assert!(!is_error(&result), "result: {}", text_of(&result));
+    assert_eq!(sole_put_body(&mock).await, json!({ "status": "CLOSED" }));
+}
+
+#[tokio::test]
+async fn mark_as_duplicate_sends_only_dupe_of_and_comment() {
+    // No status/resolution insert: the instance's
+    // duplicate_or_move_bug_status decides, not this tool.
+    let mock = MockServer::start().await;
+    mount_classify(&mock, world_readable_bug(7)).await;
+    mount_classify(&mock, world_readable_bug(8)).await;
+    mount_update_put(
+        &mock,
+        json!({
+            "dupe_of": 8,
+            "comment": { "body": "Marking as duplicate of bug 8" },
+        }),
+    )
+    .await;
+    let client = client_for("", &mock).await;
+    let result = call(
+        &client,
+        "mark_as_duplicate",
+        json!({ "bug_id": 7, "duplicate_of": 8 }),
+    )
+    .await;
+    assert!(!is_error(&result), "result: {}", text_of(&result));
+    assert_eq!(
+        sole_put_body(&mock).await,
+        json!({
+            "dupe_of": 8,
+            "comment": { "body": "Marking as duplicate of bug 8" },
+        })
+    );
+}
+
 /// Tool names a client sees when it lists the server's tools — a real
 /// `tools/list` request over the wire, so the handler's own listing path
 /// is what answers.
