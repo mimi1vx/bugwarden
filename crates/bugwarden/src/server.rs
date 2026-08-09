@@ -726,15 +726,46 @@ fn project_field_catalog(envelope: &Value, on_bug_entry_only: bool) -> Vec<Value
         .unwrap_or_default()
 }
 
+/// Project one `can_change_to` entry (only Bugzilla's `bug_status` field
+/// carries these) to `{name, comment_required}`; `comment_required` is
+/// omitted when the upstream entry does not carry it.
+fn project_can_change_to(c: &Value) -> Option<Value> {
+    let name = c.get("name")?.clone();
+    let mut obj = serde_json::Map::new();
+    obj.insert("name".to_string(), name);
+    if let Some(comment_required) = c.get("comment_required") {
+        obj.insert("comment_required".to_string(), comment_required.clone());
+    }
+    Some(Value::Object(obj))
+}
+
+/// Project one legal value of a `/rest/field/bug/{name}` response to
+/// `{name}`, plus `is_open` and `can_change_to` when the upstream value
+/// carries them (only `bug_status` does). Absent keys are omitted, never
+/// `null`, so non-workflow fields stay as cheap as before.
+fn project_field_value(v: &Value) -> Option<Value> {
+    let name = v.get("name")?.clone();
+    let mut obj = serde_json::Map::new();
+    obj.insert("name".to_string(), name);
+    if let Some(is_open) = v.get("is_open") {
+        obj.insert("is_open".to_string(), is_open.clone());
+    }
+    if let Some(list) = v.get("can_change_to").and_then(Value::as_array) {
+        let projected: Vec<Value> = list.iter().filter_map(project_can_change_to).collect();
+        obj.insert("can_change_to".to_string(), Value::Array(projected));
+    }
+    Some(Value::Object(obj))
+}
+
 /// Project one `/rest/field/bug/{name}` response to the detail shape
 /// (`bug_fields` with `field_names` named): [`project_field_common`] plus
-/// `values`, reduced to the legal value NAMES only.
+/// `values`, each reduced to [`project_field_value`].
 fn project_field_detail(f: &Value) -> Value {
     let mut obj = project_field_common(f);
     let values: Vec<Value> = f
         .get("values")
         .and_then(Value::as_array)
-        .map(|vs| vs.iter().filter_map(|v| v.get("name").cloned()).collect())
+        .map(|vs| vs.iter().filter_map(project_field_value).collect())
         .unwrap_or_default();
     if let Value::Object(map) = &mut obj {
         map.insert("values".to_string(), Value::Array(values));

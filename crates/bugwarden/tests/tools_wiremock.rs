@@ -1865,7 +1865,9 @@ async fn bug_fields_catalog_can_be_filtered_to_bug_entry_fields() {
 }
 
 #[tokio::test]
-async fn bug_fields_detail_includes_legal_value_names() {
+async fn bug_fields_detail_reports_workflow_data_when_upstream_carries_it() {
+    // bug_status carries is_open/can_change_to; a plain field's values stay
+    // {name}-only even when fetched through the same detail path.
     let mock = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/rest/field/bug/bug_status"))
@@ -1876,7 +1878,31 @@ async fn bug_fields_detail_includes_legal_value_names() {
                 "is_custom": false,
                 "is_mandatory": false,
                 "is_on_bug_entry": false,
-                "values": [{ "name": "NEW" }, { "name": "CONFIRMED" }],
+                "values": [
+                    {
+                        "name": "NEW",
+                        "is_open": true,
+                        "can_change_to": [
+                            { "name": "ASSIGNED", "comment_required": false },
+                            { "name": "RESOLVED", "comment_required": true },
+                        ],
+                    },
+                    { "name": "RESOLVED", "is_open": false, "can_change_to": [] },
+                ],
+            }]
+        })))
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/field/bug/priority"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "fields": [{
+                "name": "priority",
+                "display_name": "Priority",
+                "is_custom": false,
+                "is_mandatory": false,
+                "is_on_bug_entry": false,
+                "values": [{ "name": "P1" }, { "name": "P2" }],
             }]
         })))
         .mount(&mock)
@@ -1891,7 +1917,33 @@ async fn bug_fields_detail_includes_legal_value_names() {
     .await;
     assert!(!is_error(&result), "{}", text_of(&result));
     let envelope: Value = serde_json::from_str(&text_of(&result)).expect("JSON");
-    assert_eq!(envelope["fields"][0]["values"], json!(["NEW", "CONFIRMED"]));
+    assert_eq!(
+        envelope["fields"][0]["values"],
+        json!([
+            {
+                "name": "NEW",
+                "is_open": true,
+                "can_change_to": [
+                    { "name": "ASSIGNED", "comment_required": false },
+                    { "name": "RESOLVED", "comment_required": true },
+                ],
+            },
+            { "name": "RESOLVED", "is_open": false, "can_change_to": [] },
+        ])
+    );
+
+    let result = call(
+        &client,
+        "bug_fields",
+        json!({ "field_names": ["priority"] }),
+    )
+    .await;
+    assert!(!is_error(&result), "{}", text_of(&result));
+    let envelope: Value = serde_json::from_str(&text_of(&result)).expect("JSON");
+    assert_eq!(
+        envelope["fields"][0]["values"],
+        json!([{ "name": "P1" }, { "name": "P2" }])
+    );
 }
 
 #[tokio::test]
