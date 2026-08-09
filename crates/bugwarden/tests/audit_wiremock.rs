@@ -190,10 +190,19 @@ async fn mount_fixture(mock: &MockServer) {
         .mount(mock)
         .await;
     // Catch-all for /rest/bug: classification and body fetches for id=7
-    // and the quicksearch scan all serve bug 7.
+    // and the quicksearch scan all serve bug 7. The quicksearch scan must
+    // see an empty page past offset 0, or a short page no longer being
+    // end-of-results makes it replay this single row up to the request
+    // bound.
     Mock::given(method("GET"))
         .and(path("/rest/bug"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "bugs": [world_bug(7)] })))
+        .respond_with(|req: &wiremock::Request| {
+            let q: std::collections::HashMap<_, _> = req.url.query_pairs().collect();
+            if q.get("offset").is_some_and(|v| v != "0") {
+                return ResponseTemplate::new(200).set_body_json(json!({ "bugs": [] }));
+            }
+            ResponseTemplate::new(200).set_body_json(json!({ "bugs": [world_bug(7)] }))
+        })
         .mount(mock)
         .await;
     Mock::given(method("GET"))
