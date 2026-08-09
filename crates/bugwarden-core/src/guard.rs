@@ -236,9 +236,17 @@ impl Guard {
     /// Rows requested from Bugzilla per scan step.
     const SEARCH_SCAN_CHUNK: u32 = 200;
 
-    /// Ceiling on upstream rows examined for one search, i.e. at most
-    /// `SEARCH_SCAN_MAX / SEARCH_SCAN_CHUNK` sequential requests.
+    /// Ceiling on upstream rows examined for one search.
     const SEARCH_SCAN_MAX: u32 = 2_000;
+
+    /// Ceiling on sequential upstream requests for one search.
+    ///
+    /// Used to imply this as `SEARCH_SCAN_MAX / SEARCH_SCAN_CHUNK`, but that
+    /// assumed every request returns a full chunk. Bugzilla may cap a page
+    /// below the requested `limit` (an admin-configured `max_search_results`,
+    /// for instance), so rows-per-request is the server's choice, not ours,
+    /// and the request count needs its own explicit bound.
+    const SEARCH_SCAN_REQUESTS: u32 = 10;
 
     /// Run a search whose `limit`/`offset` address the bugs the client may
     /// actually SEE, not the rows Bugzilla happens to return.
@@ -266,10 +274,17 @@ impl Guard {
     /// The bugs returned are the objects that were classified, so no second
     /// fetch can serve something the verdict never saw.
     ///
-    /// Bounds: at most [`Guard::MAX_SEARCH_WINDOW`] addressable, and at most
-    /// `SEARCH_SCAN_MAX` upstream rows examined. Hitting either truncates the
-    /// page, which is indistinguishable from running out of results — the
-    /// safe direction, since it hides more rather than less.
+    /// Bounds: at most [`Guard::MAX_SEARCH_WINDOW`] addressable, at most
+    /// `SEARCH_SCAN_MAX` upstream rows examined, and at most
+    /// `SEARCH_SCAN_REQUESTS` sequential requests issued. Whichever binds
+    /// first truncates the page, which is indistinguishable from running out
+    /// of results — the safe direction, since it hides more rather than
+    /// less. The scan does NOT stop on a short page: Bugzilla may cap a page
+    /// below the requested chunk size (an admin-configured
+    /// `max_search_results`, for instance), and a short page caused by that
+    /// cap looks identical to one caused by the result set ending. Only an
+    /// empty page, or one of the two scan bounds above (`SEARCH_SCAN_MAX`,
+    /// `SEARCH_SCAN_REQUESTS`), ends the scan.
     ///
     /// Residual, and deliberately accepted: filling a window of VISIBLE bugs
     /// takes more upstream rows when bugs are hidden, so the request count
@@ -323,8 +338,12 @@ impl Guard {
         let mut seen: BTreeSet<u64> = BTreeSet::new();
         let mut scanned: u32 = 0;
         let mut dropped: Vec<u64> = Vec::new();
+        let mut requests: u32 = 0;
 
-        while (visible.len() as u32) < target && scanned < Self::SEARCH_SCAN_MAX {
+        while (visible.len() as u32) < target
+            && scanned < Self::SEARCH_SCAN_MAX
+            && requests < Self::SEARCH_SCAN_REQUESTS
+        {
             let chunk = Self::SEARCH_SCAN_CHUNK.min(Self::SEARCH_SCAN_MAX - scanned);
             let envelope = bz
                 .quicksearch(key, query, status, include_fields, chunk, scanned)
@@ -351,8 +370,9 @@ impl Guard {
             dropped.extend(chunk_dropped);
             visible.extend(kept);
             scanned += returned;
+            requests += 1;
 
-            if returned < chunk {
+            if returned == 0 {
                 break; // upstream has no more rows
             }
         }

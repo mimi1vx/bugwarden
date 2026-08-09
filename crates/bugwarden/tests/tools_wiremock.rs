@@ -359,8 +359,15 @@ async fn create_scoped_rule_files_bugs_without_hiding_reads_issue_26() {
     Mock::given(method("GET"))
         .and(path("/rest/bug"))
         .and(query_param("quicksearch", "ALL product:Enterprise"))
+        .and(query_param("offset", "0"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "bugs": [bug] })))
         .expect(1)
+        .mount(&mock)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/rest/bug"))
+        .and(query_param("quicksearch", "ALL product:Enterprise"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "bugs": [] })))
         .mount(&mock)
         .await;
     Mock::given(method("POST"))
@@ -514,7 +521,16 @@ async fn mount_search(mock: &MockServer, rows: Vec<Value>) {
         .await;
     Mock::given(method("GET"))
         .and(path("/rest/bug"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "bugs": rows })))
+        .respond_with(move |req: &wiremock::Request| {
+            // A short page is no longer end-of-results, so past offset 0 the
+            // scan must see an empty page or it replays `rows` up to the
+            // request bound.
+            let q: std::collections::HashMap<_, _> = req.url.query_pairs().collect();
+            if q.get("offset").is_some_and(|v| v != "0") {
+                return ResponseTemplate::new(200).set_body_json(json!({ "bugs": [] }));
+            }
+            ResponseTemplate::new(200).set_body_json(json!({ "bugs": rows.clone() }))
+        })
         .mount(mock)
         .await;
 }

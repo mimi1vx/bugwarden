@@ -556,6 +556,13 @@ const EMBARGO_POLICY: &str = concat!(
 /// Serve `total` bugs, every id in `hidden` carrying an embargo group, and
 /// answer any offset/limit the way Bugzilla would.
 async fn corpus(server: &MockServer, total: u64, hidden: &[u64]) {
+    corpus_capped(server, total, hidden, usize::MAX).await;
+}
+
+/// Like [`corpus`], but clamps every response to at most `cap` rows the way
+/// an administrator's `max_search_results` does, regardless of the `limit`
+/// requested.
+async fn corpus_capped(server: &MockServer, total: u64, hidden: &[u64], cap: usize) {
     let hidden: std::collections::BTreeSet<u64> = hidden.iter().copied().collect();
     let all: Vec<serde_json::Value> = (1..=total)
         .map(|id| {
@@ -573,7 +580,7 @@ async fn corpus(server: &MockServer, total: u64, hidden: &[u64]) {
             let q: std::collections::HashMap<_, _> = req.url.query_pairs().collect();
             let get = |k: &str| q.get(k).and_then(|v| v.parse::<usize>().ok());
             let offset = get("offset").unwrap_or(0);
-            let limit = get("limit").unwrap_or(all.len());
+            let limit = get("limit").unwrap_or(all.len()).min(cap);
             let page: Vec<_> = all.iter().skip(offset).take(limit).cloned().collect();
             ResponseTemplate::new(200).set_body_json(json!({ "bugs": page }))
         })
@@ -767,6 +774,46 @@ async fn quicksearch_window_scan_is_bounded() {
 }
 
 #[tokio::test]
+async fn quicksearch_window_survives_a_capped_page() {
+    // A server capping pages at 100 rows used to look identical to one
+    // running out of results after the first request: `returned < chunk`
+    // fired either way. A short page must not end the scan while the
+    // request/row bounds still have room.
+    let server = MockServer::start().await;
+    corpus_capped(&server, 300, &[], 100).await;
+    let g = guard(EMBARGO_POLICY);
+
+    let got = g
+        .quicksearch_window(&client(&server), KEY, &search("q", 5, 150), None)
+        .await
+        .expect("search succeeds")
+        .bugs;
+    assert_eq!(ids_of(&got), (151..=155).collect::<Vec<u64>>());
+}
+
+#[tokio::test]
+async fn quicksearch_window_capped_page_still_bounds_requests() {
+    // The pathological case: a 1-row page cap. The request bound must hold
+    // even though the row bound (2000) is nowhere near reached, and the
+    // result must look like ordinary truncation, not an error.
+    let server = MockServer::start().await;
+    corpus_capped(&server, 5_000, &[], 1).await;
+    let g = guard(EMBARGO_POLICY);
+
+    let got = g
+        .quicksearch_window(&client(&server), KEY, &search("q", 50, 0), None)
+        .await
+        .expect("search succeeds")
+        .bugs;
+    assert_eq!(
+        requests_to(&server).await,
+        10,
+        "the request bound must hold when the row bound cannot"
+    );
+    assert_eq!(ids_of(&got), (1..=10).collect::<Vec<u64>>());
+}
+
+#[tokio::test]
 async fn quicksearch_window_deep_offset_is_empty_whether_or_not_bugs_are_hidden() {
     // Past the addressable window the answer is an empty page — and it must
     // be the SAME empty page whether or not bugs were hidden earlier. When
@@ -945,15 +992,24 @@ async fn quicksearch_window_accounting_skips_idless_rows_and_repeats() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/rest/bug"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
-            "bugs": [
-                bug(1, &[], OLD),
-                bug(2, &["embargo-security"], OLD),
-                json!({ "summary": "no id here", "groups": [] }),
-                bug(1, &[], OLD), // repeated inside the chunk
-                bug(3, &[], OLD),
-            ]
-        })))
+        .respond_with(|req: &Request| {
+            // A short page is no longer end-of-results, so only the first
+            // request may return rows — the second must be empty or the
+            // scan keeps going and `scanned` stops meaning "one chunk".
+            let q: std::collections::HashMap<_, _> = req.url.query_pairs().collect();
+            if q.get("offset").is_some_and(|v| v != "0") {
+                return ResponseTemplate::new(200).set_body_json(json!({ "bugs": [] }));
+            }
+            ResponseTemplate::new(200).set_body_json(json!({
+                "bugs": [
+                    bug(1, &[], OLD),
+                    bug(2, &["embargo-security"], OLD),
+                    json!({ "summary": "no id here", "groups": [] }),
+                    bug(1, &[], OLD), // repeated inside the chunk
+                    bug(3, &[], OLD),
+                ]
+            }))
+        })
         .mount(&server)
         .await;
 
