@@ -1012,7 +1012,9 @@ pub struct UpdateBugStatusParams {
     pub bug_id: u64,
     /// New status.
     pub status: String,
-    /// Resolution (required when status is CLOSED).
+    /// Resolution. Bugzilla requires this when the target status is
+    /// closing and the bug has none, and clears it automatically when
+    /// the target status is open.
     #[serde(default)]
     pub resolution: Option<String>,
     /// Optional comment explaining the change.
@@ -2198,7 +2200,7 @@ impl BugWarden {
     }
 
     #[tool(
-        description = "Update the status of a bug. Optionally add a comment explaining the status change.\n\nValid statuses: NEW, ASSIGNED, MODIFIED, ON_QA, VERIFIED, CLOSED.\nFor CLOSED, you MUST also provide a resolution (FIXED, WONTFIX, NOTABUG, DUPLICATE, etc.)",
+        description = "Update the status of a bug. Optionally add a comment explaining the status change.\n\nStatuses and resolutions are instance-defined; use bug_fields with field_names: [\"bug_status\"] to list them along with their openness and legal transitions where the operator has enabled discovery. A closing status needs a resolution unless the bug already has one; Bugzilla clears the resolution itself when moving to an open status.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2217,13 +2219,6 @@ impl BugWarden {
             resolution = ?p.resolution,
             "tool: update_bug_status"
         );
-        let has_resolution = p.resolution.as_deref().is_some_and(|r| !r.is_empty());
-        if p.status == "CLOSED" && !has_resolution {
-            note_refused(&ctx);
-            return Ok(err_text(
-                "Resolution is required when setting status to CLOSED (e.g., FIXED, WONTFIX, NOTABUG, DUPLICATE)",
-            ));
-        }
         let key = self.api_key(&ctx)?;
         let caller = self.guard.resolve_caller(&self.bz, &key).await;
         if let Some(denied) = self
@@ -2235,11 +2230,8 @@ impl BugWarden {
 
         let mut payload = serde_json::Map::new();
         payload.insert("status".to_string(), json!(p.status));
-        if has_resolution {
-            payload.insert("resolution".to_string(), json!(p.resolution));
-        } else if p.status != "CLOSED" && p.status != "VERIFIED" {
-            // Clear resolution when reopening.
-            payload.insert("resolution".to_string(), json!(""));
+        if let Some(resolution) = p.resolution.as_deref().filter(|r| !r.is_empty()) {
+            payload.insert("resolution".to_string(), json!(resolution));
         }
         attach_comment(&mut payload, &p.comment);
 
@@ -2572,7 +2564,7 @@ impl BugWarden {
     }
 
     #[tool(
-        description = "Mark a bug as a duplicate of another bug and close it.",
+        description = "Mark a bug as a duplicate of another bug. Bugzilla applies its configured duplicate status and the DUPLICATE resolution.",
         annotations(
             read_only_hint = false,
             destructive_hint = true,
@@ -2630,9 +2622,9 @@ impl BugWarden {
         } else {
             p.comment.clone()
         };
+        // Setting dupe_of alone is enough: Bugzilla's set_dup_id applies the
+        // instance's duplicate_or_move_bug_status and resolution DUPLICATE.
         let mut payload = serde_json::Map::new();
-        payload.insert("status".to_string(), json!("CLOSED"));
-        payload.insert("resolution".to_string(), json!("DUPLICATE"));
         payload.insert("dupe_of".to_string(), json!(p.duplicate_of));
         attach_comment(&mut payload, &comment);
 
