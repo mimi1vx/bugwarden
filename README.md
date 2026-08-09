@@ -688,7 +688,7 @@ none of the three needs an API key. Every other tool does, including
 | `bug_url` | Compute `{server}/show_bug.cgi?id={id}` locally | none (contacts nothing) |
 | `bugzilla_server_info` | Bugzilla version, extensions, timezone, time, parameters | none |
 | `bugzilla_products` | *(needs `global.allow_discovery = true`)* Lists enterable product names, or fetches components/versions/milestones for up to 5 named products — as Bugzilla reports it to this server's key, never filtered by this policy | none |
-| `bug_fields` | *(needs `global.allow_discovery = true`)* Lists bug fields (without legal values), or fetches up to 5 named fields with their legal values — as Bugzilla reports it to this server's key, never filtered by this policy | none |
+| `bug_fields` | *(needs `global.allow_discovery = true`)* Lists bug fields (without legal values), or fetches up to 5 named fields with their legal values — each carrying `is_open` and `can_change_to` when Bugzilla reports them (only `bug_status` does), so a client can learn the workflow instead of guessing it — as Bugzilla reports it to this server's key, never filtered by this policy | none |
 | `quicksearch_syntax` | Bugzilla's quicksearch syntax documentation (HTML) | none |
 | `mcp_server_info` | This server's name and version, the Bugzilla URL, the transport, and a coarse policy summary: rule count, default action, `min_bug_age_days`, read-only flag, disabled tool names. Never a rule name or a match criterion | none |
 
